@@ -53,6 +53,7 @@ all_features <- keras::layer_concatenate(
   name = 'all_features'
 )
 
+
 # Calculate total feature dimension for attention
 total_feature_dim <- q0 + 2*d  # Design features + 2 embeddings
 
@@ -68,6 +69,18 @@ attention_weights <- all_features |>
     name = 'attention_weights',
     kernel_initializer = keras::initializer_constant(0.1),  # Start with slight preference for linear
     bias_initializer = keras::initializer_constant(-0.5)    # Bias toward linear initially
+  )
+
+# ==============================================================================
+# LINEAR PATH: Traditional GLM-style linear relationships
+# ==============================================================================
+linear_path <- all_features |>
+  keras::layer_dense(
+    units = 1, 
+    activation = 'linear', 
+    name = 'linear_path',
+    kernel_initializer = keras::initializer_random_normal(stddev = 0.01),
+    bias_initializer = keras::initializer_constant(log(lambda_hom))
   )
 
 # ==============================================================================
@@ -105,17 +118,19 @@ nonlinear_path <- all_features |>
 # We need to apply attention at the feature level, so we'll use a custom approach
 # Create weighted features for each path
 
-# For linear path: apply (1 - attention) weighting
-linear_weighted_features <- keras::layer_multiply(
-  list(all_features, keras::layer_lambda(function(x) 1 - x, name = 'linear_weights')(attention_weights)),
-  name = 'linear_weighted_features'
-)
+linear_weights <- attention_weights |> 
+  keras::layer_lambda(
+    f = function(x) 1 - x,
+    name = "linear_weights"
+  )
 
-# For nonlinear path: apply attention weighting  
-nonlinear_weighted_features <- keras::layer_multiply(
-  list(all_features, attention_weights),
-  name = 'nonlinear_weighted_features'
-)
+# For linear path: apply (1 - attention) weighting
+lin_multiply_layer <- keras::keras$layers$Multiply(name = "linear_weighted_features")
+linear_weighted_features <- lin_multiply_layer(list(all_features, linear_weights))
+
+# For nonlinear path: apply attention weighting
+nonlin_multiply_layer <- keras::keras$layers$Multiply(name = "nonlinear_weighted_features")
+nonlinear_weighted_features <- nonlin_multiply_layer(list(all_features, attention_weights))
 
 # Recompute paths with weighted features
 linear_output <- linear_weighted_features |>
@@ -145,13 +160,13 @@ nonlinear_output <- nonlinear_weighted_features |>
 # COMBINE PATHS
 # ==============================================================================
 # Combine linear and nonlinear outputs
-combined_network <- keras::layer_add(
-  list(linear_output, nonlinear_output), 
-  name = 'combined_paths'
-)
+comb_add_layer <- keras::keras$layers$Add(name = "combined_paths")
+
+combined_network <- comb_add_layer(list(linear_output, nonlinear_output))
 
 # Add the offset (exposure or GLM predictions)
-eta <- keras::layer_add(list(combined_network, LogVol), name = 'eta')
+eta_add_layer <- keras::keras$layers$Add(name = "eta")
+eta <- eta_add_layer(list(combined_network, LogVol))
 
 # Apply exponential for Poisson
 response <- eta |> 
@@ -169,14 +184,13 @@ model_attention <- keras::keras_model(
 # ==============================================================================
 # COMPILE MODEL
 # ==============================================================================
-model_attention |> keras::compile(
-  optimizer = keras::optimizer_adam(learning_rate = 0.001),
-  loss = 'poisson',
-  metrics = list('mae', 'mse')
+model_attention$compile(
+  loss = "poisson",
+  optimizer = keras::optimizer_nadam(learning_rate = 0.001),
 )
 
 # Print model summary
-summary(model_attention)
+summary(model_attention$summary())
 
 # ==============================================================================
 # TRAINING EXAMPLE
